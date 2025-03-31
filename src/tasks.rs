@@ -1,20 +1,25 @@
 use crate::task_picker::CandidateTask;
-use chrono::{DateTime, Local, TimeZone};
-use std::fmt;
+use chrono::{DateTime, Local};
 use std::thread::sleep;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use std::{fmt, mem};
+use tokio::sync::broadcast::error::TryRecvError;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::{self, JoinHandle};
-use tracing::trace;
+use tracing::{error, info, trace};
+
+pub type Id = usize;
 
 #[derive(Debug)]
 pub struct Task {
-    pub id: u32,
+    pub id: Id,
     pub name: &'static str,
     pub status: TaskStatus,
     pub start: DateTime<Local>,
     pub end: Option<DateTime<Local>>,
     pub description: &'static str,
-    pub handle: JoinHandle<i128>,
+    pub handle: Option<JoinHandle<i128>>,
+    pub progress: u8, // This is the part where I regretted not just sharing the struct w/ task
 }
 
 #[derive(Debug)]
@@ -23,6 +28,29 @@ pub enum TaskStatus {
     Sleeping,
     OnStrike,
     KnownUnknown,
+    Finished,
+}
+
+/// Sent from tasks via mpsc to App
+#[derive(Debug)]
+pub enum TaskTxMsg {
+    /// Conditions were untenable and the task refuses to work
+    LaborDispute(Id),
+    /// Work resumes after a bargain was struck
+    Reconciliation(Id),
+    /// Updates the table with percentage (progress is 0..100)
+    RunReport {
+        id: Id,
+        progress: u8,
+    },
+    SleepReport(Id),
+}
+
+/// Sent by App to all tasks via broadcast (tasks check if it's for them)
+#[derive(Debug, Clone, Copy)]
+pub enum TaskRxMsg {
+    /// I asked nicely
+    PleaseDie(Id), // Abort handles don't work on sync spawns
 }
 
 impl fmt::Display for TaskStatus {
@@ -32,46 +60,105 @@ impl fmt::Display for TaskStatus {
             TaskStatus::Sleeping => write!(f, "Sleeping"),
             TaskStatus::OnStrike => write!(f, "Strike!"),
             TaskStatus::KnownUnknown => write!(f, "???"),
+            TaskStatus::Finished => write!(f, "Done"),
         }
     }
 }
 
 impl Task {
-    pub fn new(ct: &CandidateTask) -> Self {
+    pub fn new(
+        ct: &CandidateTask,
+        mpsc_tx: mpsc::Sender<TaskTxMsg>,
+        bcast_rx: broadcast::Receiver<TaskRxMsg>,
+        id: Id,
+    ) -> Self {
+        // This is write once read never nonsense because I only wanted so much effort
+        // into the 'pretend to work' code
         let handle = task::spawn_blocking(move || {
+            let id = id;
+            let tx = mpsc_tx;
+            let mut rx = bcast_rx;
+
             // The game was rigged all along
-            let mut time_to_sleep = rand::random_range(2..60);
-            trace!("total sleep: {:?}", time_to_sleep);
+            let time_to_sleep = rand::random_range(2..60);
+            let mut remaining_time = time_to_sleep;
+            trace!("total sleep scheduled: {:?}", time_to_sleep);
             let mut sum: i128 = 0;
-            while time_to_sleep > 0 {
+            while remaining_time > 0 {
+                // This could be better, but check just once per big cycle if we need to terminate
+                // TODO: Could we interrupt a sleep cycle?
+                match rx.try_recv() {
+                    Ok(TaskRxMsg::PleaseDie(addr_to)) => {
+                        if addr_to == id {
+                            trace!("recieved strong suggestion to terminate, doing so");
+                            return sum;
+                        }
+                    }
+                    Err(TryRecvError::Closed) => {
+                        trace!("recived no message, but App is gone(?). terminating");
+                        return sum;
+                    }
+                    Err(_) => {} // Doesn't matter
+                };
                 // Do some really hecking important work
                 trace!("sum: {:?}", sum);
+                if let Err(some) = tx.blocking_send(TaskTxMsg::RunReport {
+                    id,
+                    progress: (((time_to_sleep - remaining_time) / time_to_sleep) * 100) as u8,
+                }) {
+                    error!("problem sending to App: {:?}", some);
+                } else {
+                    trace!("sent a run report");
+                }
                 sum = rand::random_iter::<i32>()
                     .take(111333777)
                     .fold(sum, |acc, num| acc + ((num as i128 % 500).abs()));
-                let microsleep = rand::random_range(1..(time_to_sleep + 1));
-                time_to_sleep -= microsleep;
+                let microsleep = rand::random_range(1..(remaining_time + 1));
+                remaining_time -= microsleep;
                 trace!(
                     "sleep block for {:?} with {:?} remaining after",
                     microsleep,
-                    time_to_sleep
+                    remaining_time
                 );
+                if let Err(some) = tx.blocking_send(TaskTxMsg::SleepReport(id)) {
+                    error!("problem sending to App: {:?}", some);
+                } else {
+                    trace!("sent a sleep report")
+                }
                 sleep(Duration::from_secs(microsleep));
             }
             trace!("done with sum {:?}", sum);
             sum
         });
-        let start = Local::now();
 
-        //TODO: This
+        let start = Local::now();
         Self {
-            id: 0,
+            id,
             name: ct.name,
             status: TaskStatus::KnownUnknown,
             start,
             end: None,
             description: ct.description,
-            handle,
+            handle: Some(handle),
+            progress: 0,
+        }
+    }
+    pub async fn poll(&mut self) -> Option<i128> {
+        if self.handle.as_ref()?.is_finished() {
+            self.status = TaskStatus::Finished;
+            self.end = Some(chrono::Local::now());
+            self.progress = 100;
+            //FIXME: This is pure gore (but also compensating for an architectural issue)
+            let handle = mem::take(&mut self.handle).unwrap();
+            match handle.await {
+                Err(e) => {
+                    error!("error when joining done task {e:?}");
+                    None
+                }
+                Ok(v) => Some(v),
+            }
+        } else {
+            None
         }
     }
 }
