@@ -1,5 +1,3 @@
-use std::iter::Inspect;
-
 use color_eyre::eyre::{Ok, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
@@ -13,8 +11,9 @@ use ratatui::{
     },
     DefaultTerminal, Frame, Viewport,
 };
-use task_picker::TaskPicker;
-use tracing::{info, trace, Level};
+use task_picker::{CandidateTask, TaskPicker};
+use tasks::Task;
+use tracing::{error, info, trace, Level};
 mod task_picker;
 mod tasks;
 
@@ -91,9 +90,6 @@ impl App {
     fn handle_key_event(&mut self, event: KeyEvent) {
         trace!("key down: {:?}", event);
         match event.code {
-            KeyCode::Char('q') => {
-                todo!()
-            }
             KeyCode::Char('k') | KeyCode::Up => match self.view_state {
                 ViewState::TaskAdd => self.picker.previous(),
                 ViewState::Inspect => {} //TODO: This
@@ -106,7 +102,16 @@ impl App {
             },
 
             KeyCode::Enter => match self.view_state {
-                ViewState::TaskAdd => {}
+                ViewState::TaskAdd => {
+                    if let Some(ct) = self.picker.select() {
+                        info!("selected candidate task {:?}", ct);
+                        self.add_task(ct);
+                        self.view_state = ViewState::Monitor;
+                    } else {
+                        //Should be recoverable so we'll just ignore it otherwise
+                        error!("attempted to select task from picker but got none");
+                    }
+                }
                 ViewState::Inspect => {}
                 ViewState::Monitor => {}
             },
@@ -133,6 +138,11 @@ impl App {
             },
             _ => {}
         }
+    }
+
+    /// Calls out for the actual task, mostly handles UI juggling
+    fn add_task(&mut self, ct: &CandidateTask) {
+        self.tasks.push(Task::new(ct));
     }
 
     fn exit(&mut self) {
@@ -187,16 +197,26 @@ impl Widget for &mut App {
                 Row::new(vec![
                     //TODO: We can be more efficient here (CoW?)
                     Cell::from(task.id.to_string()),
-                    Cell::from(task.name.clone()),
+                    Cell::from(task.name),
                     Cell::from(task.status.to_string()),
-                    Cell::from("TODO".to_string()), // Time start TODO: Use time crate
-                    Cell::from("TODO".to_string()), // Time end
-                    Cell::from(task.description.to_string()),
+                    Cell::from(task.start.format("%I:%M:%S %P").to_string()),
+                    Cell::from(match task.end {
+                        Some(time) => time.format("%I:%M:%S %P").to_string(),
+                        None => "-".to_string(),
+                    }),
+                    Cell::from(task.description),
                 ])
             })
             .collect();
 
-        let header = Row::new(vec!["ID", "Name", "Status", "Start Time", "End Time"]);
+        let header = Row::new(vec![
+            "ID",
+            "Name",
+            "Status",
+            "Start Time",
+            "End Time",
+            "Description",
+        ]);
         let widths = [
             //TODO: These could be made dynamic
             Constraint::Length(8),
@@ -204,6 +224,7 @@ impl Widget for &mut App {
             Constraint::Length(10),
             Constraint::Length(16),
             Constraint::Length(16),
+            Constraint::Length(42),
         ];
         let table = Table::new(rows, widths).header(header).block(block);
         StatefulWidget::render(table, area, buf, &mut self.table_state);

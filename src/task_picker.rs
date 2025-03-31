@@ -21,8 +21,8 @@ pub struct TaskPicker {
 
 #[derive(Debug)]
 pub struct CandidateTask {
-    name: &'static str,
-    description: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
 }
 
 impl fmt::Display for CandidateTask {
@@ -41,24 +41,30 @@ impl Default for TaskPicker {
 }
 
 impl TaskPicker {
+    /// Wraps list down
     pub fn next(&mut self) {
-        //! Wraps list down
         self.state.select_next();
     }
 
+    /// Wraps list up
     pub fn previous(&mut self) {
-        //! Wraps list up
         self.state.select_previous();
     }
 
-    pub fn select(&mut self) -> CandidateTask {
-        //! Should be called on state change FROM modal, to get candidate for creation in main
-        todo!()
+    /// Should be called on state change FROM modal, to get candidate for creation in main
+    pub fn select(&self) -> Option<&'static CandidateTask> {
+        // This SHOULD always have something selected, but we will handle the possibility back in main
+        // Return None if there's no selection. Return None if there is and no item @ selection
+        if let Some(idx) = self.state.selected() {
+            self.items.get(idx).map(|ct| Some(*ct))?
+        } else {
+            None
+        }
     }
 
+    /// Should be called every time the modal is 'opened' (state change in main). Picks from the
+    /// pool and rebuilds list again
     pub fn regen(&mut self) {
-        //! Should be called every time the modal is 'opened' (state change in main). Picks from the
-        //! pool and rebuilds list again
         self.items = COOL_TASKS
             .choose_multiple(&mut rand::rng(), FETCH_AMOUNT)
             .collect()
