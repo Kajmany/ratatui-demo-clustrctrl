@@ -29,6 +29,8 @@ pub enum TaskStatus {
     OnStrike,
     KnownUnknown,
     Finished,
+    PendingCancel,
+    Canceled,
 }
 
 /// Sent from tasks via mpsc to App
@@ -44,6 +46,7 @@ pub enum TaskTxMsg {
         progress: u8,
     },
     SleepReport(Id),
+    DeathReport(Id),
 }
 
 /// Sent by App to all tasks via broadcast (tasks check if it's for them)
@@ -62,6 +65,8 @@ impl fmt::Display for TaskStatus {
             TaskStatus::OnStrike => write!(f, "Strike!"),
             TaskStatus::KnownUnknown => write!(f, "???"),
             TaskStatus::Finished => write!(f, "Done"),
+            TaskStatus::PendingCancel => write!(f, "Cancelling..."),
+            TaskStatus::Canceled => write!(f, "Cancelled"),
         }
     }
 }
@@ -92,6 +97,11 @@ impl Task {
                     Ok(TaskRxMsg::PleaseDie(addr_to)) => {
                         if addr_to == id {
                             info!("recieved strong suggestion to terminate, doing so");
+                            if let Err(some) = tx.blocking_send(TaskTxMsg::DeathReport(id)) {
+                                error!("problem sending death report to App {:?}", some)
+                            } else {
+                                trace!("death report sent off to App")
+                            }
                             return sum;
                         }
                     }

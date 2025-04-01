@@ -1,31 +1,28 @@
 use std::time::Duration;
 
 use color_eyre::eyre::Result;
-use crossterm::event::{self, Event, EventStream, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Rect},
-    style::{Style, Stylize},
+    layout::Rect,
+    style::Stylize,
     symbols::border,
     text::Line,
-    widgets::{
-        Block, Borders, Cell, Clear, Paragraph, Row, StatefulWidget, Table, TableState, Widget,
-    },
-    DefaultTerminal, Frame, Viewport,
+    widgets::{Block, StatefulWidget, Widget},
+    DefaultTerminal, Frame,
 };
 use task_picker::{CandidateTask, TaskPicker};
+use task_table::TaskTable;
 use tasks::{Task, TaskRxMsg, TaskStatus, TaskTxMsg};
 use tokio::{
     sync::{broadcast, mpsc},
     task,
 };
-use tracing::{error, info, instrument, trace, Level};
+use tracing::{error, info, trace, warn};
 use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
 mod task_picker;
+mod task_table;
 mod tasks;
-
-///Used as a timeout to poll tasks if there's no events sooner
-const TICK_FPS: f64 = 30.0;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,7 +58,7 @@ async fn launch_app() -> Result<()> {
 #[derive(Debug)]
 pub struct App {
     picker: TaskPicker,
-    table_state: TableState,
+    task_table: TaskTable,
     view_state: ViewState,
     exit: bool,
     tasks: Vec<tasks::Task>,
@@ -75,8 +72,11 @@ pub struct App {
 
 #[derive(Debug)]
 enum ViewState {
+    /// Modal should be active, and we can add tasks here
     TaskAdd,
+    /// Main screen. Can't do anything but enter other modes & watch
     Monitor,
+    /// Main screen, but we can select tasks on the table and kill them
     Inspect,
 }
 
@@ -87,7 +87,7 @@ impl Default for App {
         let (bcast_tx, _) = broadcast::channel(16);
         Self {
             picker: TaskPicker::default(),
-            table_state: TableState::default().with_selected(0),
+            task_table: TaskTable::default(),
             tasks: vec![],
             tasks_created: 0,
             view_state: ViewState::Monitor,
@@ -140,13 +140,18 @@ impl App {
                     trace!("got a sleep report from {id}");
                     self.tasks[id].status = TaskStatus::Sleeping;
                 }
+                //TODO: Implement
                 TaskTxMsg::LaborDispute(id) => {
-                    trace!("task {id} refuses to work at this time");
+                    info!("task {id} refuses to work at this time");
                     self.tasks[id].status = TaskStatus::OnStrike;
                 }
                 TaskTxMsg::Reconciliation(id) => {
-                    trace!("task {id} has reached an agreement, and will resume");
+                    info!("task {id} has reached an agreement, and will resume");
                     self.tasks[id].status = TaskStatus::Running;
+                }
+                TaskTxMsg::DeathReport(id) => {
+                    info!("task {id} has sent word of termination");
+                    self.tasks[id].status = TaskStatus::Canceled;
                 }
             };
         }
@@ -175,13 +180,13 @@ impl App {
         match event.code {
             KeyCode::Char('k') | KeyCode::Up => match self.view_state {
                 ViewState::TaskAdd => self.picker.previous(),
-                ViewState::Inspect => {} //TODO: This
-                _ => {}
+                ViewState::Inspect => self.task_table.previous(self.tasks.len()),
+                ViewState::Monitor => {} // No table selection in Monitor mode
             },
             KeyCode::Char('j') | KeyCode::Down => match self.view_state {
                 ViewState::TaskAdd => self.picker.next(),
-                ViewState::Inspect => {} //TODO: This
-                _ => {}
+                ViewState::Inspect => self.task_table.next(self.tasks.len()),
+                ViewState::Monitor => {} // No table selection in Monitor mode
             },
 
             KeyCode::Enter => match self.view_state {
@@ -195,7 +200,7 @@ impl App {
                         error!("attempted to select task from picker but got none");
                     }
                 }
-                ViewState::Inspect => {}
+                ViewState::Inspect => self.kill_selected_task(),
                 ViewState::Monitor => {}
             },
 
@@ -209,9 +214,18 @@ impl App {
                     }
                 };
             }
-            KeyCode::F(2) => {
-                todo!()
-            }
+            // Go to inspect mode IFF we're at main menu
+            KeyCode::F(2) => match self.view_state {
+                ViewState::TaskAdd => {} // No action from Add mode
+                ViewState::Inspect => {} // Already in Inspect mode
+                ViewState::Monitor => {
+                    self.view_state = ViewState::Inspect;
+                    // If table is not empty and nothing selected, select first row
+                    if !self.tasks.is_empty() && self.task_table.state.selected().is_none() {
+                        self.task_table.state.select(Some(0));
+                    }
+                }
+            },
             KeyCode::F(3) => self.exit(),
 
             // Go back unless we're @ main menu
@@ -232,6 +246,24 @@ impl App {
             self.tasks_created, //This counter becomes the unique 'ID'
         ));
         self.tasks_created += 1;
+    }
+
+    fn kill_selected_task(&mut self) {
+        // This only works because we don't have sorting TODO: Make less brittle?
+        if let Some(selected) = self.task_table.state.selected() {
+            // Use get_mut to obtain a mutable reference directly
+            if let Some(task) = self.tasks.get_mut(selected) {
+                match self.bcast_tx.send(TaskRxMsg::PleaseDie(task.id)) {
+                    Ok(_) => {
+                        info!("sent a kill message to task {}", task.id);
+                        task.status = TaskStatus::PendingCancel;
+                    }
+                    Err(e) => error!("problem sending kill message to task {}: {e:?}", task.id),
+                }
+                return;
+            }
+        }
+        warn!("tried to send a kill message to a task that doesn't exist");
     }
 
     fn exit(&mut self) {
@@ -269,60 +301,28 @@ impl Widget for &mut App {
             ],
         });
 
-        let block = Block::bordered()
+        let main_block = Block::bordered()
             .title(title.left_aligned())
             .title_bottom(controls.centered())
             .border_set(border::THICK);
 
-        // TABLE
-        let rows: Vec<Row> = self
-            .tasks
-            .iter()
-            .map(|task| {
-                Row::new(vec![
-                    //TODO: We can be more efficient here (CoW?)
-                    Cell::from(task.id.to_string()),
-                    Cell::from(task.name),
-                    Cell::from(task.status.to_string()),
-                    Cell::from(format!("{}%", task.progress)),
-                    Cell::from(task.start.format("%I:%M:%S %P").to_string()),
-                    Cell::from(match task.end {
-                        Some(time) => time.format("%I:%M:%S %P").to_string(),
-                        None => "-".to_string(),
-                    }),
-                    Cell::from(task.description),
-                ])
-            })
-            .collect();
+        // Render the main block first to draw the borders
+        let internal_area = main_block.inner(area);
+        main_block.render(area, buf);
 
-        let header = Row::new(vec![
-            "ID",
-            "Name",
-            "Status",
-            "Progress",
-            "Start Time",
-            "End Time",
-            "Description",
-        ]);
-        let widths = [
-            //TODO: These could be made dynamic
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(16),
-            Constraint::Length(16),
-            Constraint::Length(42),
-        ];
-        let table = Table::new(rows, widths).header(header).block(block);
-        StatefulWidget::render(table, area, buf, &mut self.table_state);
+        // Render the TaskTable inside the main block's inner area
+        // Pass the task data required by the TaskTable widget's render method
+        StatefulWidget::render(
+            &mut self.task_table,
+            internal_area,
+            buf,
+            &mut &self.tasks, // We don't mutate but the trait wants a mut ref
+        );
 
         // We want to draw our modal over if we're in add state
         if let ViewState::TaskAdd = self.view_state {
             let modal_width = (area.width as f32 * 0.85) as u16;
             let modal_height = (area.height as f32 * 0.85) as u16;
-            //let modal_width = area.width / 2;
-            //let modal_height = area.height / 2;
             let modal_area = Rect {
                 x: (area.width - modal_width) / 2,
                 y: (area.height - modal_height) / 2,
