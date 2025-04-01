@@ -51,6 +51,7 @@ pub enum TaskTxMsg {
 pub enum TaskRxMsg {
     /// I asked nicely
     PleaseDie(Id), // Abort handles don't work on sync spawns
+    EveryoneDies,
 }
 
 impl fmt::Display for TaskStatus {
@@ -90,12 +91,16 @@ impl Task {
                 match rx.try_recv() {
                     Ok(TaskRxMsg::PleaseDie(addr_to)) => {
                         if addr_to == id {
-                            trace!("recieved strong suggestion to terminate, doing so");
+                            info!("recieved strong suggestion to terminate, doing so");
                             return sum;
                         }
                     }
+                    Ok(TaskRxMsg::EveryoneDies) => {
+                        info!("recieved terminate-all message, joining the club");
+                        return sum;
+                    }
                     Err(TryRecvError::Closed) => {
-                        trace!("recived no message, but App is gone(?). terminating");
+                        info!("recived no message, but App is gone(?). terminating");
                         return sum;
                     }
                     Err(_) => {} // Doesn't matter
@@ -104,7 +109,9 @@ impl Task {
                 trace!("sum: {:?}", sum);
                 if let Err(some) = tx.blocking_send(TaskTxMsg::RunReport {
                     id,
-                    progress: (((time_to_sleep - remaining_time) / time_to_sleep) * 100) as u8,
+                    //Sub-optimal casts but they keep us from rounding progress into 0%
+                    progress: (((time_to_sleep - remaining_time) as f64 / time_to_sleep as f64)
+                        * 100.0) as u8,
                 }) {
                     error!("problem sending to App: {:?}", some);
                 } else {
@@ -143,21 +150,18 @@ impl Task {
             progress: 0,
         }
     }
-    pub async fn poll(&mut self) -> Option<i128> {
-        if self.handle.as_ref()?.is_finished() {
+    pub fn check_done(&mut self) -> Option<JoinHandle<i128>> {
+        if self.handle.as_ref().map_or(false, |h| h.is_finished()) {
             self.status = TaskStatus::Finished;
             self.end = Some(chrono::Local::now());
             self.progress = 100;
-            //FIXME: This is pure gore (but also compensating for an architectural issue)
+            // This is feels messy but the point is we want to lose ownership of the handle
+            // We don't need any useful value stored in self.handle anymore since it's done
             let handle = mem::take(&mut self.handle).unwrap();
-            match handle.await {
-                Err(e) => {
-                    error!("error when joining done task {e:?}");
-                    None
-                }
-                Ok(v) => Some(v),
-            }
+            self.handle = None;
+            Some(handle)
         } else {
+            // There is no handle or it isn't done
             None
         }
     }

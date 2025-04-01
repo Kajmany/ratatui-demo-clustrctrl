@@ -83,7 +83,7 @@ enum ViewState {
 impl Default for App {
     fn default() -> Self {
         // Used by tasks to bubble a message up
-        let (mpsc_tx, mut mpsc_rx) = mpsc::channel(100);
+        let (mpsc_tx, mpsc_rx) = mpsc::channel(100);
         let (bcast_tx, _) = broadcast::channel(16);
         Self {
             picker: TaskPicker::default(),
@@ -114,7 +114,6 @@ impl App {
         frame.render_widget(self, area);
     }
 
-    #[instrument(skip(self))]
     async fn update(&mut self) -> Result<()> {
         //If I were doing it all over again I'd use a proper event-driven architecture
         //Like in the templates
@@ -130,6 +129,8 @@ impl App {
         // Legally speaking, this is struct and tokio abuse.
         while let Ok(msg) = self.mpsc_rx.try_recv() {
             match msg {
+                //FIXME: We'd panic here if we got a message for an ID that doesn't exist
+                // the logic is pretty tight where we TX but this would be !Ok in a srs project
                 TaskTxMsg::RunReport { id, progress } => {
                     trace!("got a run report from {id} with progress {progress}%");
                     self.tasks[id].progress = progress;
@@ -149,12 +150,23 @@ impl App {
                 }
             };
         }
-        // FIXME: Rethink the polling here
-        self.tasks.iter_mut().for_each(|task| async {
-            if let Some(i) = task.poll().await {
-                info!("task {} finished and reported {i}", task.id);
+        // Separately, check handles. This is kind of redundant given we have an MPSC channel that
+        // reports doneness. Architectural skill issue, in hindsight.
+        for task in self.tasks.iter_mut() {
+            if let Some(handle) = task.check_done() {
+                match handle.await {
+                    Ok(res) => {
+                        info!("Task {} finished and reported: {res}", task.id)
+                    }
+                    Err(e) => {
+                        error!(
+                            "Problem finishing allegedly completed task {}: {e:?}",
+                            task.id
+                        );
+                    }
+                }
             }
-        });
+        }
         Ok(())
     }
 
@@ -223,6 +235,11 @@ impl App {
     }
 
     fn exit(&mut self) {
+        //TODO: Worst case this broadcast has a 60 second delay, not great for exiting!
+        match self.bcast_tx.send(TaskRxMsg::EveryoneDies) {
+            Ok(_) => info!("sent exit message to all tasks"),
+            Err(e) => error!("problem sending exit message {e:?}"),
+        }
         self.exit = true;
     }
 }
