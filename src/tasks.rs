@@ -6,7 +6,7 @@ use std::{fmt, mem};
 use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::{self, JoinHandle};
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
 pub type Id = usize;
 
@@ -72,92 +72,27 @@ impl fmt::Display for TaskStatus {
 impl Task {
     pub fn new(
         ct: &CandidateTask,
-        mpsc_tx: mpsc::Sender<TaskTxMsg>,
-        bcast_rx: broadcast::Receiver<TaskRxMsg>,
+        tx: mpsc::Sender<TaskTxMsg>,
+        rx: broadcast::Receiver<TaskRxMsg>,
         id: Id,
     ) -> Self {
         // This is write once read never nonsense because I only wanted so much effort
         // into the 'pretend to work' code
-        let handle = task::spawn_blocking(move || {
-            let id = id;
-            let tx = mpsc_tx;
-            let mut rx = bcast_rx;
-
-            // The game was rigged all along
-            let time_to_sleep = rand::random_range(2..60);
-            let mut remaining_time = time_to_sleep;
-            trace!("total sleep scheduled: {:?}", time_to_sleep);
-            let mut sum: i128 = 0;
-            while remaining_time > 0 {
-                // This could be better, but check just once per big cycle if we need to terminate
-                // TODO: Could we interrupt a sleep cycle?
-                match rx.try_recv() {
-                    Ok(TaskRxMsg::PleaseStop(addr_to)) => {
-                        if addr_to == id {
-                            info!("recieved strong suggestion to terminate, doing so");
-                            if let Err(some) = tx.blocking_send(TaskTxMsg::CancelReport(id)) {
-                                error!("problem sending cancel report to App {:?}", some)
-                            } else {
-                                trace!("cancel report sent off to App")
-                            }
-                            return sum;
-                        }
-                    }
-                    Ok(TaskRxMsg::EveryoneStopPls) => {
-                        info!("recieved terminate-all message, joining the club");
-                        return sum;
-                    }
-                    Err(TryRecvError::Closed) => {
-                        info!("recived no message, but App is gone(?). terminating");
-                        return sum;
-                    }
-                    Err(_) => {} // Doesn't matter
-                };
-                // Do some really hecking important work
-                trace!("sum: {:?}", sum);
-                if let Err(some) = tx.blocking_send(TaskTxMsg::RunReport {
-                    id,
-                    //Sub-optimal casts but they keep us from rounding progress into 0%
-                    progress: (((time_to_sleep - remaining_time) as f64 / time_to_sleep as f64)
-                        * 100.0) as u8,
-                }) {
-                    error!("problem sending to App: {:?}", some);
-                } else {
-                    trace!("sent a run report");
-                }
-                sum = rand::random_iter::<i32>()
-                    .take(111333777)
-                    .fold(sum, |acc, num| acc + ((num as i128 % 500).abs()));
-                let microsleep = rand::random_range(1..(remaining_time + 1));
-                remaining_time -= microsleep;
-                trace!(
-                    "sleep block for {:?} with {:?} remaining after",
-                    microsleep,
-                    remaining_time
-                );
-                if let Err(some) = tx.blocking_send(TaskTxMsg::SleepReport(id)) {
-                    error!("problem sending to App: {:?}", some);
-                } else {
-                    trace!("sent a sleep report")
-                }
-                sleep(Duration::from_secs(microsleep));
-            }
-            trace!("done with sum {:?}", sum);
-            sum
-        });
-
         let start = Local::now();
-        Self {
+        let mut proto_self = Self {
             id,
             name: ct.name,
             status: TaskStatus::KnownUnknown,
             start,
             end: None,
             description: ct.description,
-            handle: Some(handle),
+            handle: None,
             progress: 0,
             pending_cancel: false,
-        }
+        };
+        let handle = task::spawn_blocking(move || Task::blocking_dummy_task(id, tx, rx));
+        proto_self.handle = Some(handle);
+        proto_self
     }
     pub fn check_done(&mut self) -> Option<JoinHandle<i128>> {
         if self.handle.as_ref().map_or(false, |h| h.is_finished()) {
@@ -172,6 +107,93 @@ impl Task {
         } else {
             // There is no handle or it isn't done
             None
+        }
+    }
+
+    // The fact that these are static methods is symptomatic of undercooked architecture - I'm just
+    // going to stick with message passing, but I'd lean towards shared state if I did it over
+
+    /// This is the actual task we spawn
+    fn blocking_dummy_task(
+        id: Id,
+        tx: mpsc::Sender<TaskTxMsg>,
+        mut rx: broadcast::Receiver<TaskRxMsg>,
+    ) -> i128 {
+        // The game was rigged all along
+        let time_to_sleep = rand::random_range(2..60);
+        let mut remaining_time = time_to_sleep;
+        trace!("total sleep scheduled: {:?}", time_to_sleep);
+        let mut sum: i128 = 0;
+        while remaining_time > 0 {
+            Task::check_for_term_message(id, &mut rx, &tx);
+            // Do some really hecking important work
+            trace!("sum: {:?}", sum);
+            if let Err(some) = tx.blocking_send(TaskTxMsg::RunReport {
+                id,
+                //Sub-optimal casts but they keep us from rounding progress into 0%
+                progress: (((time_to_sleep - remaining_time) as f64 / time_to_sleep as f64) * 100.0)
+                    as u8,
+            }) {
+                error!("problem sending to App: {:?}", some);
+            } else {
+                trace!("sent a run report");
+            }
+            sum = rand::random_iter::<i32>()
+                .take(111333777)
+                .fold(sum, |acc, num| acc + ((num as i128 % 500).abs()));
+            let microsleep = rand::random_range(1..(remaining_time + 1));
+            remaining_time -= microsleep;
+            Task::check_for_term_message(id, &mut rx, &tx);
+            trace!(
+                "sleep block for {:?} with {:?} remaining after",
+                microsleep,
+                remaining_time
+            );
+            if let Err(some) = tx.blocking_send(TaskTxMsg::SleepReport(id)) {
+                error!("problem sending to App: {:?}", some);
+            } else {
+                trace!("sent a sleep report")
+            }
+            sleep(Duration::from_secs(microsleep));
+        }
+        trace!("done with sum {:?}", sum);
+        sum
+    }
+
+    /// Reads all messages. If any are relevant, sends bool so the blocking task can terminate
+    fn check_for_term_message(
+        id: Id,
+        rx: &mut broadcast::Receiver<TaskRxMsg>,
+        tx: &mpsc::Sender<TaskTxMsg>,
+    ) -> bool {
+        loop {
+            match rx.try_recv() {
+                //FIXME: Something here is wrong
+                Ok(TaskRxMsg::PleaseStop(addr_to)) => {
+                    if addr_to == id {
+                        info!("recieved strong suggestion to terminate, doing so");
+                        if let Err(some) = tx.blocking_send(TaskTxMsg::CancelReport(id)) {
+                            error!("problem sending cancel report to App {:?}", some)
+                        } else {
+                            trace!("cancel report sent off to App")
+                        }
+                        return true;
+                    } // Else we keep checking messages
+                }
+                Ok(TaskRxMsg::EveryoneStopPls) => {
+                    info!("recieved terminate-all message, joining the club");
+                    return true;
+                }
+                Err(TryRecvError::Closed) => {
+                    info!("recived no message, but App is gone(?). terminating");
+                    return true;
+                }
+                Err(TryRecvError::Lagged(by)) => {
+                    warn!("task {id} reports lag of {by} messages")
+                    // And keep checking messages
+                }
+                Err(TryRecvError::Empty) => return false,
+            };
         }
     }
 }

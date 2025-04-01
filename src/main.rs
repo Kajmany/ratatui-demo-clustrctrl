@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, StatefulWidget, Widget},
     DefaultTerminal, Frame,
 };
-use task_picker::{CandidateTask, TaskPicker};
+use task_picker::TaskPicker;
 use task_table::TaskTable;
 use tasks::{Task, TaskRxMsg, TaskStatus, TaskTxMsg};
 use tokio::{
