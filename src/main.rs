@@ -76,7 +76,7 @@ enum ViewState {
     TaskAdd,
     /// Main screen. Can't do anything but enter other modes & watch
     Monitor,
-    /// Main screen, but we can select tasks on the table and kill them
+    /// Main screen, but we can select tasks on the table and cancel them
     Inspect,
 }
 
@@ -149,7 +149,7 @@ impl App {
                     info!("task {id} has reached an agreement, and will resume");
                     self.tasks[id].status = TaskStatus::Running;
                 }
-                TaskTxMsg::DeathReport(id) => {
+                TaskTxMsg::CancelReport(id) => {
                     info!("task {id} has sent word of termination");
                     self.tasks[id].status = TaskStatus::Canceled;
                 }
@@ -161,11 +161,11 @@ impl App {
             if let Some(handle) = task.check_done() {
                 match handle.await {
                     Ok(res) => {
-                        info!("Task {} finished and reported: {res}", task.id)
+                        info!("task {} finished and reported: {res}", task.id)
                     }
                     Err(e) => {
                         error!(
-                            "Problem finishing allegedly completed task {}: {e:?}",
+                            "problem finishing allegedly completed task {}: {e:?}",
                             task.id
                         );
                     }
@@ -176,39 +176,30 @@ impl App {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
-        trace!("key down: {:?}", event);
+        info!("key down: {:?}", event);
         match event.code {
             KeyCode::Char('k') | KeyCode::Up => match self.view_state {
                 ViewState::TaskAdd => self.picker.previous(),
                 ViewState::Inspect => self.task_table.previous(self.tasks.len()),
-                ViewState::Monitor => {} // No table selection in Monitor mode
+                ViewState::Monitor => {}
             },
             KeyCode::Char('j') | KeyCode::Down => match self.view_state {
                 ViewState::TaskAdd => self.picker.next(),
                 ViewState::Inspect => self.task_table.next(self.tasks.len()),
-                ViewState::Monitor => {} // No table selection in Monitor mode
+                ViewState::Monitor => {}
             },
 
             KeyCode::Enter => match self.view_state {
-                ViewState::TaskAdd => {
-                    if let Some(ct) = self.picker.select() {
-                        info!("selected candidate task {:?}", ct);
-                        self.add_task(ct);
-                        self.view_state = ViewState::Monitor;
-                    } else {
-                        //Should be recoverable so we'll just ignore it otherwise
-                        error!("attempted to select task from picker but got none");
-                    }
-                }
-                ViewState::Inspect => self.kill_selected_task(),
+                ViewState::TaskAdd => self.add_task(),
+                ViewState::Inspect => self.cancel_selected_task(),
                 ViewState::Monitor => {}
             },
 
             //Go to task add IFF we're at main menu
             KeyCode::F(1) => {
                 match self.view_state {
-                    ViewState::TaskAdd => {}
-                    ViewState::Monitor | ViewState::Inspect => {
+                    ViewState::TaskAdd | ViewState::Inspect => {}
+                    ViewState::Monitor => {
                         self.view_state = ViewState::TaskAdd;
                         self.picker.regen(); // Pick fresh pool entries
                     }
@@ -216,8 +207,7 @@ impl App {
             }
             // Go to inspect mode IFF we're at main menu
             KeyCode::F(2) => match self.view_state {
-                ViewState::TaskAdd => {} // No action from Add mode
-                ViewState::Inspect => {} // Already in Inspect mode
+                ViewState::TaskAdd | ViewState::Inspect => {}
                 ViewState::Monitor => {
                     self.view_state = ViewState::Inspect;
                     // If table is not empty and nothing selected, select first row
@@ -226,11 +216,16 @@ impl App {
                     }
                 }
             },
+
+            // We can always exit
             KeyCode::F(3) => self.exit(),
 
             // Go back unless we're @ main menu
             KeyCode::Esc => match self.view_state {
-                ViewState::TaskAdd | ViewState::Inspect => self.view_state = ViewState::Monitor,
+                ViewState::TaskAdd | ViewState::Inspect => {
+                    self.view_state = ViewState::Monitor;
+                    self.task_table.state.select(None);
+                }
                 ViewState::Monitor => {}
             },
             _ => {}
@@ -238,39 +233,46 @@ impl App {
     }
 
     /// Calls out for the actual task, mostly handles UI juggling
-    fn add_task(&mut self, ct: &CandidateTask) {
-        self.tasks.push(Task::new(
-            ct,
-            self.mpsc_tx.clone(),
-            self.bcast_tx.subscribe(),
-            self.tasks_created, //This counter becomes the unique 'ID'
-        ));
-        self.tasks_created += 1;
+    fn add_task(&mut self) {
+        if let Some(ct) = self.picker.select() {
+            info!("selected candidate task {:?}", ct);
+            self.view_state = ViewState::Monitor;
+            self.tasks.push(Task::new(
+                ct,
+                self.mpsc_tx.clone(),
+                self.bcast_tx.subscribe(),
+                self.tasks_created, //This counter becomes the unique 'ID'
+            ));
+            self.tasks_created += 1;
+        } else {
+            //Should be recoverable so we'll just ignore it otherwise
+            error!("attempted to select task from picker but got none");
+        }
     }
 
-    fn kill_selected_task(&mut self) {
+    fn cancel_selected_task(&mut self) {
         // This only works because we don't have sorting TODO: Make less brittle?
         if let Some(selected) = self.task_table.state.selected() {
             // Use get_mut to obtain a mutable reference directly
             if let Some(task) = self.tasks.get_mut(selected) {
-                match self.bcast_tx.send(TaskRxMsg::PleaseDie(task.id)) {
+                match self.bcast_tx.send(TaskRxMsg::PleaseStop(task.id)) {
                     Ok(_) => {
-                        info!("sent a kill message to task {}", task.id);
-                        task.status = TaskStatus::PendingCancel;
+                        info!("sent a cancel message to task {}", task.id);
+                        task.pending_cancel = true;
                     }
-                    Err(e) => error!("problem sending kill message to task {}: {e:?}", task.id),
+                    Err(e) => error!("problem sending cancel message to task {}: {e:?}", task.id),
                 }
                 return;
             }
         }
-        warn!("tried to send a kill message to a task that doesn't exist");
+        warn!("tried to send a cancel message to a task that doesn't exist");
     }
 
     fn exit(&mut self) {
         //TODO: Worst case this broadcast has a 60 second delay, not great for exiting!
-        match self.bcast_tx.send(TaskRxMsg::EveryoneDies) {
-            Ok(_) => info!("sent exit message to all tasks"),
-            Err(e) => error!("problem sending exit message {e:?}"),
+        match self.bcast_tx.send(TaskRxMsg::EveryoneStopPls) {
+            Ok(_) => info!("sent cancel message to all tasks"),
+            Err(e) => error!("problem sending cancel message to all tasks {e:?}"),
         }
         self.exit = true;
     }
@@ -282,9 +284,11 @@ impl Widget for &mut App {
         // TODO: Better represent what's actionable at a given time
         let controls = Line::from(match self.view_state {
             ViewState::Monitor => vec![
+                " Back ".into(),
+                "<ESC>".gray().bold(),
                 " New Task ".into(),
                 "<F1>".blue().bold(),
-                " Kill Selected ".into(),
+                " Manage Tasks ".into(),
                 "<F2>".blue().bold(),
                 " Quit ".into(),
                 "<F3> ".blue().bold(),
@@ -293,9 +297,9 @@ impl Widget for &mut App {
                 " Back ".into(),
                 "<ESC>".blue().bold(),
                 " New Task ".into(),
-                "<F1>".blue().bold(),
-                " Kill Selected ".into(), // Not actionable
-                "<F2>".blue().bold(),
+                "<F1>".gray().bold(),
+                " Manage Tasks ".into(),
+                "<F2>".gray().bold(),
                 " Quit ".into(),
                 "<F3> ".blue().bold(),
             ],

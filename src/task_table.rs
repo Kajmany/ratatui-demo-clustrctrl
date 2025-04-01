@@ -74,6 +74,7 @@ impl<'a> StatefulWidget for &'a mut TaskTable {
             "ID",
             "Name",
             "Status",
+            "Halt?",
             "Progress",
             "Start Time",
             "End Time",
@@ -92,6 +93,7 @@ impl<'a> StatefulWidget for &'a mut TaskTable {
                         Cell::from(task.id.to_string()),
                         Cell::from(task.name),
                         status_cell_style(&task.status),
+                        abort_cell_style(&task.status, task.pending_cancel),
                         Cell::from(format!("{}%", task.progress)),
                         Cell::from(task.start.format("%I:%M:%S %P").to_string()),
                         Cell::from(match task.end {
@@ -110,6 +112,7 @@ impl<'a> StatefulWidget for &'a mut TaskTable {
             Constraint::Max(4),
             Constraint::Length(16),
             Constraint::Length(10),
+            Constraint::Length(7),
             Constraint::Length(12),
             Constraint::Length(14),
             Constraint::Length(14),
@@ -141,11 +144,22 @@ fn status_cell_style(status: &TaskStatus) -> Cell {
     }
 }
 
+fn abort_cell_style(status: &TaskStatus, cancel: bool) -> Cell {
+    if cancel {
+        match status {
+            TaskStatus::Canceled => Cell::from("Done").style(Color::Green),
+            _ => Cell::from("Req").style(Color::Yellow),
+        }
+    } else {
+        Cell::from(" ")
+    }
+}
+
 // Could do more, but enforces alternating color
 fn row_style(row: Row, ctr: i32) -> Row {
     if ctr % 2 == 0 {
         row
     } else {
-        row.style(Color::Blue)
+        row.style(Color::Gray)
     }
 }

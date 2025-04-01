@@ -20,6 +20,7 @@ pub struct Task {
     pub description: &'static str,
     pub handle: Option<JoinHandle<i128>>,
     pub progress: u8, // This is the part where I regretted not just sharing the struct w/ task
+    pub pending_cancel: bool,
 }
 
 #[derive(Debug)]
@@ -29,7 +30,6 @@ pub enum TaskStatus {
     OnStrike,
     KnownUnknown,
     Finished,
-    PendingCancel,
     Canceled,
 }
 
@@ -46,15 +46,14 @@ pub enum TaskTxMsg {
         progress: u8,
     },
     SleepReport(Id),
-    DeathReport(Id),
+    CancelReport(Id),
 }
 
 /// Sent by App to all tasks via broadcast (tasks check if it's for them)
 #[derive(Debug, Clone, Copy)]
 pub enum TaskRxMsg {
-    /// I asked nicely
-    PleaseDie(Id), // Abort handles don't work on sync spawns
-    EveryoneDies,
+    PleaseStop(Id), // Abort handles don't work on sync spawns
+    EveryoneStopPls,
 }
 
 impl fmt::Display for TaskStatus {
@@ -65,7 +64,6 @@ impl fmt::Display for TaskStatus {
             TaskStatus::OnStrike => write!(f, "Strike!"),
             TaskStatus::KnownUnknown => write!(f, "???"),
             TaskStatus::Finished => write!(f, "Done"),
-            TaskStatus::PendingCancel => write!(f, "Cancelling..."),
             TaskStatus::Canceled => write!(f, "Cancelled"),
         }
     }
@@ -94,18 +92,18 @@ impl Task {
                 // This could be better, but check just once per big cycle if we need to terminate
                 // TODO: Could we interrupt a sleep cycle?
                 match rx.try_recv() {
-                    Ok(TaskRxMsg::PleaseDie(addr_to)) => {
+                    Ok(TaskRxMsg::PleaseStop(addr_to)) => {
                         if addr_to == id {
                             info!("recieved strong suggestion to terminate, doing so");
-                            if let Err(some) = tx.blocking_send(TaskTxMsg::DeathReport(id)) {
-                                error!("problem sending death report to App {:?}", some)
+                            if let Err(some) = tx.blocking_send(TaskTxMsg::CancelReport(id)) {
+                                error!("problem sending cancel report to App {:?}", some)
                             } else {
-                                trace!("death report sent off to App")
+                                trace!("cancel report sent off to App")
                             }
                             return sum;
                         }
                     }
-                    Ok(TaskRxMsg::EveryoneDies) => {
+                    Ok(TaskRxMsg::EveryoneStopPls) => {
                         info!("recieved terminate-all message, joining the club");
                         return sum;
                     }
@@ -158,6 +156,7 @@ impl Task {
             description: ct.description,
             handle: Some(handle),
             progress: 0,
+            pending_cancel: false,
         }
     }
     pub fn check_done(&mut self) -> Option<JoinHandle<i128>> {
