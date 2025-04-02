@@ -7,11 +7,13 @@ use rand::seq::IndexedRandom;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::{Color, Stylize},
+    text::Line,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, StatefulWidget, Widget},
 };
 
 /// How many entries to pick out for the menu
-const FETCH_AMOUNT: usize = 6;
+pub const FETCH_AMOUNT: usize = 6;
 
 #[derive(Debug)]
 pub struct TaskPicker {
@@ -62,6 +64,11 @@ impl TaskPicker {
         }
     }
 
+    /// For when the user wants a random option. Convenient for us both!
+    pub fn select_random(&self) -> Option<&'static CandidateTask> {
+        self.items.choose(&mut rand::rng()).copied()
+    }
+
     /// Should be called every time the modal is 'opened' (state change in main). Picks from the
     /// pool and rebuilds list again
     pub fn regen(&mut self) {
@@ -74,17 +81,38 @@ impl TaskPicker {
 impl Widget for &mut TaskPicker {
     fn render(self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
-        //TODO: Style me!
+        let mut ctr = 0;
         let styled_items: Vec<ListItem> = self
             .items
             .iter()
-            .map(|item| ListItem::from(item.to_string()))
+            .map(|item| {
+                ctr += 1;
+                style_item(item, ctr)
+            })
             .collect();
+        let controls = Line::from(vec![
+            " Pick for Me! ".into(),
+            "<R>".blue().bold(),
+            " Pick Selected ".into(),
+            "<ENTER>".blue().bold(),
+        ]);
+        let block = Block::new()
+            .title(" New Task ")
+            .borders(Borders::ALL)
+            .title_bottom(controls.centered());
 
-        let block = Block::new().title(" New Task ").borders(Borders::ALL);
-
-        let list = List::new(styled_items).block(block).highlight_symbol(">");
+        let list = List::new(styled_items).block(block).highlight_symbol("> ");
         StatefulWidget::render(list, area, buf, &mut self.state);
+    }
+}
+
+/// Enforces alternating color with external counter
+fn style_item(ct: &CandidateTask, ctr: i32) -> ListItem {
+    let item = ListItem::from(ct.to_string());
+    if ctr % 2 == 0 {
+        item.style(Color::White)
+    } else {
+        item.style(Color::Gray)
     }
 }
 
@@ -154,5 +182,9 @@ const COOL_TASKS: &[CandidateTask] = &[
     CandidateTask {
         name: "Jeromy Gride",
         description: "Recycle the same oxygen molecule 17 times",
+    },
+    CandidateTask {
+        name: "Bingus",
+        description: "<REDACTED>",
     },
 ];

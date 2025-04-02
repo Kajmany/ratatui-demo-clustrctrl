@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, StatefulWidget, Widget},
     DefaultTerminal, Frame,
 };
-use task_picker::TaskPicker;
+use task_picker::{CandidateTask, TaskPicker};
 use task_table::TaskTable;
 use tasks::{Task, TaskRxMsg, TaskStatus, TaskTxMsg};
 use tokio::{
@@ -53,7 +53,8 @@ async fn main() -> Result<()> {
     };
     info!("application terminated. restoring");
     ratatui::restore();
-    println!("Goodbye!");
+    //TODO: Skill issue not using collaborative tasks. We could just force stop them probably
+    println!("Goodbye! Any active tasks sent exit signals. This will take time to be heeded.");
     Ok(())
 }
 
@@ -203,8 +204,14 @@ impl App {
                 ViewState::Monitor => {}
             },
 
+            KeyCode::Char('r') => {
+                if let ViewState::TaskAdd = self.view_state {
+                    self.add_task(self.picker.select_random());
+                }
+            }
+
             KeyCode::Enter => match self.view_state {
-                ViewState::TaskAdd => self.add_task(),
+                ViewState::TaskAdd => self.add_task(self.picker.select()),
                 ViewState::Inspect => self.cancel_selected_task(),
                 ViewState::Monitor => {}
             },
@@ -247,8 +254,8 @@ impl App {
     }
 
     /// Calls out for the actual task, mostly handles UI juggling
-    fn add_task(&mut self) {
-        if let Some(ct) = self.picker.select() {
+    fn add_task(&mut self, ct: Option<&'static CandidateTask>) {
+        if let Some(ct) = ct {
             info!("selected candidate task {:?}", ct);
             self.view_state = ViewState::Monitor;
             self.tasks.push(Task::new(
@@ -294,12 +301,14 @@ impl App {
 
 impl Widget for &mut App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from("  clustrctrl  ".bold());
+        let title = match self.view_state {
+            ViewState::Monitor => Line::from("  clustrctrl  ".bold()),
+            ViewState::Inspect => Line::from("  clustrctrl ━ [inspect] ".bold()),
+            ViewState::TaskAdd => Line::from("  clustrctrl ━ [task add] ".bold()),
+        };
         // TODO: Better represent what's actionable at a given time
         let controls = Line::from(match self.view_state {
             ViewState::Monitor => vec![
-                " Back ".into(),
-                "<ESC>".gray().bold(),
                 " New Task ".into(),
                 "<F1>".blue().bold(),
                 " Manage Tasks ".into(),
@@ -307,13 +316,17 @@ impl Widget for &mut App {
                 " Quit ".into(),
                 "<F3> ".blue().bold(),
             ],
-            ViewState::TaskAdd | ViewState::Inspect => vec![
+            ViewState::TaskAdd => vec![
                 " Back ".into(),
                 "<ESC>".blue().bold(),
-                " New Task ".into(),
-                "<F1>".gray().bold(),
-                " Manage Tasks ".into(),
-                "<F2>".gray().bold(),
+                " Quit ".into(),
+                "<F3> ".blue().bold(),
+            ],
+            ViewState::Inspect => vec![
+                " Back ".into(),
+                "<ESC>".blue().bold(),
+                " Terminate Task ".into(),
+                "<ENTER>".blue().bold(),
                 " Quit ".into(),
                 "<F3> ".blue().bold(),
             ],
@@ -338,9 +351,10 @@ impl Widget for &mut App {
         );
 
         // We want to draw our modal over if we're in add state
+        // TODO: Put all this inside render() if it gets more complicated
         if let ViewState::TaskAdd = self.view_state {
             let modal_width = (area.width as f32 * 0.85) as u16;
-            let modal_height = (area.height as f32 * 0.85) as u16;
+            let modal_height = (task_picker::FETCH_AMOUNT + 2) as u16;
             let modal_area = Rect {
                 x: (area.width - modal_width) / 2,
                 y: (area.height - modal_height) / 2,

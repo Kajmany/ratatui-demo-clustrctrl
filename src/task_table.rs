@@ -123,9 +123,6 @@ impl<'a> StatefulWidget for &'a mut TaskTable {
         let table = Table::new(rows, widths)
             .header(header)
             .style(Color::White)
-            .row_highlight_style(Style::new().on_blue().bold())
-            //.column_highlight_style(Color::White)
-            .cell_highlight_style(Style::new().reversed())
             .highlight_symbol(">> "); // Example highlight symbol
 
         // Use StatefulWidget's render method
