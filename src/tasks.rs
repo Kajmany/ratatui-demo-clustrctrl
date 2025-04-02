@@ -129,7 +129,11 @@ impl Task {
         // The game was rigged all along
         let time_to_sleep = rand::random_range(2..60);
         let mut remaining_time = time_to_sleep;
-        info!("total sleep scheduled: {:?} sec", time_to_sleep);
+        // These id's are redundant in the log file, but the tui_tracer won't show spans
+        info!(
+            "task {}: total sleep scheduled: {:?} sec",
+            id, time_to_sleep
+        );
         let mut sum: i128 = 0;
         while remaining_time > 0 {
             if Task::check_for_term_message(id, &mut rx, &tx) {
@@ -143,12 +147,13 @@ impl Task {
                 progress: (((time_to_sleep - remaining_time) as f64 / time_to_sleep as f64) * 100.0)
                     as u8,
             }) {
-                error!("problem sending to App: {:?}", some);
+                error!("task {}: problem sending to App: {:?}", id, some);
             } else {
                 trace!("sent a run report");
             }
             sum = rand::random_iter::<i32>()
-                .take(111333777)
+                // Imagine being an electron and someone makes you do this
+                .take(11333777)
                 .fold(sum, |acc, num| acc + ((num as i128 % 500).abs()));
             let microsleep = rand::random_range(1..(remaining_time + 1));
             remaining_time -= microsleep;
@@ -156,11 +161,11 @@ impl Task {
                 return None;
             }
             info!(
-                "sleep block for {:?} sec with {:?} sec remaining after",
-                microsleep, remaining_time
+                "id {}: sleep block for {:?} sec with {:?} sec remaining after",
+                id, microsleep, remaining_time
             );
             if let Err(some) = tx.blocking_send(TaskTxMsg::SleepReport(id)) {
-                error!("problem sending to App: {:?}", some);
+                error!("id {}: problem sending to App: {:?}", id, some);
             } else {
                 trace!("sent a sleep report")
             }
@@ -183,7 +188,7 @@ impl Task {
                     if addr_to == id {
                         trace!("recieved strong suggestion to terminate, doing so");
                         if let Err(some) = tx.blocking_send(TaskTxMsg::CancelReport(id)) {
-                            error!("problem sending cancel report to App {:?}", some)
+                            error!("id {}: problem sending cancel report to App {:?}", id, some)
                         } else {
                             trace!("cancel report sent off to App")
                         }
@@ -191,11 +196,17 @@ impl Task {
                     } // Else we keep checking messages
                 }
                 Ok(TaskRxMsg::EveryoneStopPls) => {
-                    info!("recieved terminate-all message, joining the club");
+                    info!(
+                        "id {}: recieved terminate-all message, joining the club",
+                        id
+                    );
                     return true;
                 }
                 Err(TryRecvError::Closed) => {
-                    warn!("recived no message, but App is gone(?). terminating");
+                    warn!(
+                        "id {}: recived no message, but App is gone(?). terminating",
+                        id
+                    );
                     return true;
                 }
                 Err(TryRecvError::Lagged(by)) => {

@@ -8,7 +8,7 @@ use ratatui::{
     style::{Color, Style, Stylize},
     symbols::border,
     text::Line,
-    widgets::{Block, StatefulWidget, Widget},
+    widgets::{Block, Padding, StatefulWidget, Widget},
     DefaultTerminal, Frame,
 };
 use task_picker::{CandidateTask, TaskPicker};
@@ -30,11 +30,9 @@ mod tasks;
 #[tokio::main]
 async fn main() -> Result<()> {
     color_eyre::install()?;
-    let console = console_subscriber::spawn();
     let appender = tracing_appender::rolling::never("./", "log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::registry()
-        .with(console)
         .with(tui_logger::TuiTracingSubscriberLayer)
         .with(
             tracing_subscriber::fmt::layer()
@@ -337,14 +335,15 @@ impl Widget for &mut App {
         let main_block = Block::bordered()
             .title(title.left_aligned())
             .title_bottom(controls.centered())
-            .border_set(border::THICK);
+            .border_set(border::THICK)
+            .padding(Padding::new(2, 2, 1, 4));
 
         // Render the main block first to draw the borders
         let internal_area = main_block.inner(area);
         main_block.render(area, buf);
 
         // Table fits to tasks + padding, or takes the whole window if we're short on room
-        let table_height = ((self.tasks.len() + 4) as u16).min(internal_area.height);
+        let table_height = ((self.tasks.len() + 6) as u16).min(internal_area.height);
         let [table_area, logger_area] = Layout::vertical([
             Constraint::Length(table_height),
             Constraint::Min(0), // If there's leftovers, logger gets it
@@ -361,8 +360,13 @@ impl Widget for &mut App {
 
         // Render the TuiLogger in remaining space
         if logger_area.area() > 0 {
+            // Mostly lifted from the example code
             TuiLoggerWidget::default()
-                .block(Block::bordered().title("  Message Stream "))
+                .block(
+                    Block::bordered()
+                        .title(" Message Stream ")
+                        .padding(Padding::uniform(1)),
+                )
                 .style_debug(Style::default().fg(Color::Green))
                 .style_warn(Style::default().fg(Color::Yellow))
                 .style_trace(Style::default().fg(Color::Magenta))

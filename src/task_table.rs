@@ -5,7 +5,7 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Rect},
     style::{Color, Style, Stylize},
-    widgets::{Cell, Row, StatefulWidget, Table, TableState},
+    widgets::{Block, Cell, Padding, Row, StatefulWidget, Table, TableState},
 };
 
 use crate::tasks::{Task, TaskStatus};
@@ -123,7 +123,12 @@ impl<'a> StatefulWidget for &'a mut TaskTable {
         let table = Table::new(rows, widths)
             .header(header)
             .style(Color::White)
-            .highlight_symbol(">> "); // Example highlight symbol
+            .highlight_symbol("> ")
+            .block(
+                Block::bordered()
+                    .title(" Task Table ")
+                    .padding(Padding::new(1, 1, 0, 1)),
+            );
 
         // Use StatefulWidget's render method
         StatefulWidget::render(table, area, buf, &mut self.state);
