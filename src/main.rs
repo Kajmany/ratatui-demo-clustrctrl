@@ -19,7 +19,9 @@ use tokio::{
     task,
 };
 use tracing::{error, info, trace, warn};
-use tracing_subscriber::{fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+};
 mod task_picker;
 mod task_table;
 mod tasks;
@@ -36,7 +38,12 @@ async fn main() -> Result<()> {
             tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
                 .with_thread_ids(true)
-                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE),
+                .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+                .with_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        format!("{}=trace,info", env!("CARGO_CRATE_NAME")).into()
+                    }),
+                ),
         )
         .init();
     info!("starting application");
@@ -161,7 +168,14 @@ impl App {
             if let Some(handle) = task.check_done() {
                 match handle.await {
                     Ok(res) => {
-                        info!("task {} finished and reported: {res}", task.id)
+                        if let Some(sum) = res {
+                            info!("task {} finished and reported: {sum}", task.id)
+                        } else {
+                            warn!(
+                                "task {} finished after termination and reported no sum",
+                                task.id
+                            )
+                        }
                     }
                     Err(e) => {
                         error!(
