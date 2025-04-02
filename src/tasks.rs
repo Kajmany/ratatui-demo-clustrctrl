@@ -8,6 +8,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::{self, JoinHandle};
 use tracing::{error, info, instrument, trace, warn};
 
+const MAX_SLEEPYTIME: u64 = 30;
 pub type Id = usize;
 
 #[derive(Debug)]
@@ -127,7 +128,7 @@ impl Task {
         mut rx: broadcast::Receiver<TaskRxMsg>,
     ) -> Option<i128> {
         // The game was rigged all along
-        let time_to_sleep = rand::random_range(2..60);
+        let time_to_sleep = rand::random_range(2..MAX_SLEEPYTIME);
         let mut remaining_time = time_to_sleep;
         // These id's are redundant in the log file, but the tui_tracer won't show spans
         info!(
