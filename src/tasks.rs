@@ -129,7 +129,7 @@ impl Task {
         // The game was rigged all along
         let time_to_sleep = rand::random_range(2..60);
         let mut remaining_time = time_to_sleep;
-        trace!("total sleep scheduled: {:?}", time_to_sleep);
+        info!("total sleep scheduled: {:?} sec", time_to_sleep);
         let mut sum: i128 = 0;
         while remaining_time > 0 {
             if Task::check_for_term_message(id, &mut rx, &tx) {
@@ -155,10 +155,9 @@ impl Task {
             if Task::check_for_term_message(id, &mut rx, &tx) {
                 return None;
             }
-            trace!(
-                "sleep block for {:?} with {:?} remaining after",
-                microsleep,
-                remaining_time
+            info!(
+                "sleep block for {:?} sec with {:?} sec remaining after",
+                microsleep, remaining_time
             );
             if let Err(some) = tx.blocking_send(TaskTxMsg::SleepReport(id)) {
                 error!("problem sending to App: {:?}", some);
@@ -182,7 +181,7 @@ impl Task {
             match rx.try_recv() {
                 Ok(TaskRxMsg::PleaseStop(addr_to)) => {
                     if addr_to == id {
-                        info!("recieved strong suggestion to terminate, doing so");
+                        trace!("recieved strong suggestion to terminate, doing so");
                         if let Err(some) = tx.blocking_send(TaskTxMsg::CancelReport(id)) {
                             error!("problem sending cancel report to App {:?}", some)
                         } else {
@@ -196,7 +195,7 @@ impl Task {
                     return true;
                 }
                 Err(TryRecvError::Closed) => {
-                    info!("recived no message, but App is gone(?). terminating");
+                    warn!("recived no message, but App is gone(?). terminating");
                     return true;
                 }
                 Err(TryRecvError::Lagged(by)) => {

@@ -4,8 +4,8 @@ use color_eyre::eyre::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
-    style::Stylize,
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Style, Stylize},
     symbols::border,
     text::Line,
     widgets::{Block, StatefulWidget, Widget},
@@ -22,6 +22,7 @@ use tracing::{error, info, trace, warn};
 use tracing_subscriber::{
     fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
 };
+use tui_logger::{TuiLoggerLevelOutput, TuiLoggerWidget};
 mod task_picker;
 mod task_table;
 mod tasks;
@@ -34,6 +35,7 @@ async fn main() -> Result<()> {
     let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
     tracing_subscriber::registry()
         .with(console)
+        .with(tui_logger::TuiTracingSubscriberLayer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(non_blocking)
@@ -46,6 +48,7 @@ async fn main() -> Result<()> {
                 ),
         )
         .init();
+    tui_logger::init_logger(tui_logger::LevelFilter::Info).unwrap();
     info!("starting application");
     match tokio::spawn(launch_app()).await? {
         Ok(_) => {}
@@ -191,7 +194,7 @@ impl App {
     }
 
     fn handle_key_event(&mut self, event: KeyEvent) {
-        info!("key down: {:?}", event);
+        trace!("key down: {:?}", event);
         match event.code {
             KeyCode::Char('k') | KeyCode::Up => match self.view_state {
                 ViewState::TaskAdd => self.picker.previous(),
@@ -306,7 +309,6 @@ impl Widget for &mut App {
             ViewState::Inspect => Line::from("  clustrctrl ━ [inspect] ".bold()),
             ViewState::TaskAdd => Line::from("  clustrctrl ━ [task add] ".bold()),
         };
-        // TODO: Better represent what's actionable at a given time
         let controls = Line::from(match self.view_state {
             ViewState::Monitor => vec![
                 " New Task ".into(),
@@ -341,14 +343,39 @@ impl Widget for &mut App {
         let internal_area = main_block.inner(area);
         main_block.render(area, buf);
 
+        // Table fits to tasks + padding, or takes the whole window if we're short on room
+        let table_height = ((self.tasks.len() + 4) as u16).min(internal_area.height);
+        let [table_area, logger_area] = Layout::vertical([
+            Constraint::Length(table_height),
+            Constraint::Min(0), // If there's leftovers, logger gets it
+        ])
+        .areas(internal_area);
         // Render the TaskTable inside the main block's inner area
         // Pass the task data required by the TaskTable widget's render method
         StatefulWidget::render(
             &mut self.task_table,
-            internal_area,
+            table_area,
             buf,
             &mut &self.tasks, // We don't mutate but the trait wants a mut ref
         );
+
+        // Render the TuiLogger in remaining space
+        if logger_area.area() > 0 {
+            TuiLoggerWidget::default()
+                .block(Block::bordered().title("  Message Stream "))
+                .style_debug(Style::default().fg(Color::Green))
+                .style_warn(Style::default().fg(Color::Yellow))
+                .style_trace(Style::default().fg(Color::Magenta))
+                .style_info(Style::default().fg(Color::Cyan))
+                .output_separator('|')
+                .output_timestamp(Some("%H:%M:%S%.3f ".to_string()))
+                .output_level(Some(TuiLoggerLevelOutput::Long))
+                .output_target(false)
+                .output_file(false)
+                .output_line(false)
+                .style(Style::default().fg(Color::White))
+                .render(logger_area, buf);
+        }
 
         // We want to draw our modal over if we're in add state
         // TODO: Put all this inside render() if it gets more complicated
